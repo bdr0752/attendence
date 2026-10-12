@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
     & gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -finput-charset=UTF-8 -fexec-charset=UTF-8 main.c -o attendance.exe

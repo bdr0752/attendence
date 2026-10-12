@@ -9,40 +9,15 @@
 #include <io.h>
 #endif
 
-#define MAX_STUDENTS 500
-#define MAX_RECORDS 20000
-#define ID_SIZE 32
-#define TEXT_SIZE 96
+#include "attendance_core.h"
 #define DB_FILE "attendance.db"
 #define RULE_FILE "rules.ini"
-
-typedef struct {
-    char id[ID_SIZE];
-    char name[TEXT_SIZE];
-    char class_name[TEXT_SIZE];
-} Student;
-
-typedef struct {
-    char student_id[ID_SIZE];
-    int month, day, period, status;
-} Attendance;
-
-typedef struct {
-    Student students[MAX_STUDENTS];
-    Attendance records[MAX_RECORDS];
-    int student_count, record_count;
-} Database;
 
 typedef struct {
     int id_min, id_max, id_digits_only;
     int name_min, name_max, name_strict;
     int abnormal_mask;
 } Rules;
-
-typedef struct {
-    char class_name[TEXT_SIZE];
-    int first_date, last_date;
-} ReportFilter;
 
 static Database db;
 static const char *status_names[] = {"出勤", "旷课", "事假", "病假", "迟到", "早退"};
@@ -55,6 +30,46 @@ static HANDLE console_output;
 static WORD original_color = 7;
 static int console_colors;
 #endif
+
+/* 在Windows转换UTF-8文件名，支持中文目录；调用者负责释放返回的缓冲区。 */
+#ifdef _WIN32
+static wchar_t *wide_path(const char *path)
+{
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    wchar_t *result;
+    if (!count) return NULL;
+    result = malloc((size_t)count * sizeof(wchar_t));
+    if (result && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, result, count)) { free(result); return NULL; }
+    return result;
+}
+#endif
+
+/* 以UTF-8路径打开文件；mode为ASCII模式，失败返回NULL。 */
+static FILE *open_file(const char *path, const char *mode)
+{
+#ifdef _WIN32
+    wchar_t *wide = wide_path(path), wide_mode[8];
+    FILE *file;
+    if (!wide) { errno = EINVAL; return NULL; }
+    if (!MultiByteToWideChar(CP_UTF8, 0, mode, -1, wide_mode, 8)) { free(wide); errno = EINVAL; return NULL; }
+    file = _wfopen(wide, wide_mode); free(wide); return file;
+#else
+    return fopen(path, mode);
+#endif
+}
+
+/* 删除UTF-8路径的临时文件，返回底层删除结果。 */
+static int remove_file(const char *path)
+{
+#ifdef _WIN32
+    wchar_t *wide = wide_path(path);
+    int result;
+    if (!wide) return -1;
+    result = _wremove(wide); free(wide); return result;
+#else
+    return remove(path);
+#endif
+}
 
 /* 设置控制台颜色；重定向输出不含颜色控制，非 Windows 平台保持普通文本。 */
 static void set_color(int color)
@@ -220,7 +235,7 @@ static int load_rules(void)
     int *values[] = {&rules.id_min, &rules.id_max, &rules.id_digits_only, &rules.name_min,
                     &rules.name_max, &rules.name_strict, &rules.abnormal_mask};
     int seen[7] = {0}, ok = 1, line_number = 0;
-    FILE *file = fopen(RULE_FILE, "rb");
+    FILE *file = open_file(RULE_FILE, "rb");
     char line[256];
     if (!file) {
         if (errno == ENOENT) return 1;
@@ -340,7 +355,7 @@ static int split_fields(char *line, char **fields, int capacity)
 /* 严格加载数据库，先完整校验再替换内存；缺失文件视为空库，损坏返回 0。 */
 static int load_database_from(const char *path, Database *target, int allow_missing)
 {
-    FILE *file = fopen(path, "rb");
+    FILE *file = open_file(path, "rb");
     Database *loaded;
     char line[512], *fields[8];
     int ok = 1, line_number = 1, count;
@@ -392,7 +407,9 @@ static int load_database_from(const char *path, Database *target, int allow_miss
 static int replace_file(const char *temporary, const char *target)
 {
 #ifdef _WIN32
-    return MoveFileExA(temporary, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    wchar_t *source = wide_path(temporary), *destination = wide_path(target);
+    int ok = source && destination && MoveFileExW(source, destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    free(source); free(destination); return ok;
 #else
     return rename(temporary, target) == 0;
 #endif
@@ -413,13 +430,13 @@ static int finish_file(FILE *file)
 /* 将当前数据库复制为备份，原库不存在时跳过；失败不替换已有备份。 */
 static int backup_database(void)
 {
-    FILE *source = fopen(DB_FILE, "rb"), *destination;
+    FILE *source = open_file(DB_FILE, "rb"), *destination;
     const char *temporary = DB_FILE ".bak.tmp";
     unsigned char buffer[4096];
     size_t length;
     int ok = 1;
     if (!source) return errno == ENOENT;
-    destination = fopen(temporary, "wb");
+    destination = open_file(temporary, "wb");
     if (!destination) { fclose(source); return 0; }
     while ((length = fread(buffer, 1, sizeof(buffer), source)) > 0)
         if (fwrite(buffer, 1, length, destination) != length) { ok = 0; break; }
@@ -427,7 +444,7 @@ static int backup_database(void)
     if (fclose(source)) ok = 0;
     if (!finish_file(destination)) ok = 0;
     if (ok) ok = replace_file(temporary, DB_FILE ".bak");
-    if (!ok) remove(temporary);
+    if (!ok) remove_file(temporary);
     return ok;
 }
 
@@ -435,7 +452,7 @@ static int backup_database(void)
 static int save_database(void)
 {
     const char *temporary = DB_FILE ".tmp";
-    FILE *file = fopen(temporary, "wb");
+    FILE *file = open_file(temporary, "wb");
     int i, ok = 1;
     if (!file) { perror("无法创建临时数据文件"); return 0; }
     if (fprintf(file, "ATTENDANCE_V1\n") < 0) ok = 0;
@@ -450,7 +467,7 @@ static int save_database(void)
     if (!finish_file(file)) ok = 0;
     if (ok && !backup_database()) { puts("备份写入失败，保存取消。"); ok = 0; }
     if (ok) ok = replace_file(temporary, DB_FILE);
-    if (!ok) { remove(temporary); puts("保存失败，原数据文件保留。"); }
+    if (!ok) { remove_file(temporary); puts("保存失败，原数据文件保留。"); }
     return ok;
 }
 
@@ -809,19 +826,21 @@ static void write_csv_report(FILE *output, int type, const ReportFilter *filter)
 /* 通过临时文件导出一种报表；失败保留原报表，成功返回 1。 */
 static int export_report(const char *path, int type, const ReportFilter *filter, int csv)
 {
-    char temporary[128];
+    char *temporary;
     FILE *file;
     int ok;
-    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
-    file = fopen(temporary, "wb");
-    if (!file) { printf("无法创建报表临时文件：%s。\n", strerror(errno)); return 0; }
+    temporary = malloc(strlen(path) + 5);
+    if (!temporary) { puts("内存不足。"); return 0; }
+    sprintf(temporary, "%s.tmp", path);
+    file = open_file(temporary, "wb");
+    if (!file) { printf("无法创建报表临时文件：%s。\n", strerror(errno)); free(temporary); return 0; }
     if (csv) write_csv_report(file, type, filter);
     else write_report(file, type, filter);
     ok = finish_file(file);
     if (ok) ok = replace_file(temporary, path);
-    if (!ok) { remove(temporary); puts("报表导出失败，原报表保留。"); }
+    if (!ok) { remove_file(temporary); puts("报表导出失败，原报表保留。"); }
     else printf("已导出到 %s。\n", path);
-    return ok;
+    free(temporary); return ok;
 }
 
 /* 显示报表，并按用户选择导出到固定文件；无参数、无返回值。 */
@@ -886,7 +905,7 @@ static void show_menu(void)
         if (!periods[r->period]) { periods[r->period] = 1; ++period_count; }
     }
     set_color(11);
-    printf("\n========== 大学生考勤系统 ==========\n学生：%d / %d，考勤：%d / %d\n",
+    printf("\n========== 大学生考勤系统 ==========\n学生：%d / %d，考勤记录：%d / %d\n",
            db.student_count, MAX_STUDENTS, db.record_count, MAX_RECORDS);
     set_color(-1);
     printf("覆盖 %d 个日期、%d 个不同时间段编号\n", date_count, period_count);
@@ -898,6 +917,7 @@ static void show_menu(void)
 }
 
 /* 程序入口：加载、循环交互、保存；返回 0 表示正常退出，1 表示初始化失败。 */
+#ifndef ATTENDANCE_CORE_ONLY
 int main(void)
 {
     Database *before;
@@ -965,3 +985,164 @@ int main(void)
     puts("已退出。");
     return 0;
 }
+#endif
+
+#ifdef ATTENDANCE_CORE_ONLY
+static char api_error[256];
+static Database api_before;
+#ifdef _WIN32
+static HANDLE api_lock = INVALID_HANDLE_VALUE;
+#endif
+
+/* 记录接口错误；message为UTF-8文本，返回0供调用链直接返回。 */
+static int api_fail(const char *message) { snprintf(api_error, sizeof(api_error), "%s", message); return 0; }
+const char *AT_Error(void) { return api_error; }
+const Database *AT_Data(void) { return &db; }
+const char *AT_Status(int status) { return status >= 0 && status < 6 ? status_names[status] : "未知"; }
+int AT_AbnormalMask(void) { return rules.abnormal_mask; }
+
+/* 初始化文件锁、规则与数据；启动失败不会覆盖文件。 */
+int AT_Open(void)
+{
+    api_error[0] = '\0';
+#ifdef _WIN32
+    if (api_lock != INVALID_HANDLE_VALUE) return api_fail("数据接口已打开。");
+    api_lock = CreateFileA(DB_FILE ".lock", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (api_lock == INVALID_HANDLE_VALUE) return api_fail("无法取得文件锁，请关闭其他考勤程序并检查目录写入权限。");
+#endif
+    memset(&db, 0, sizeof(db));
+    rules = (Rules){1, 31, 0, 1, 31, 1, 50};
+    if (!load_rules() || !load_database_from(DB_FILE, &db, 1)) {
+        AT_Close(); return api_fail("规则或数据文件无效，原文件已保留。请检查 rules.ini 和 attendance.db。");
+    }
+    return 1;
+}
+
+/* 释放文件锁；正常关闭不额外写入数据。 */
+void AT_Close(void)
+{
+#ifdef _WIN32
+    if (api_lock != INVALID_HANDLE_VALUE) { CloseHandle(api_lock); api_lock = INVALID_HANDLE_VALUE; }
+#endif
+}
+
+/* 提交变更；保存失败恢复变更前的完整数据库，成功清除错误信息。 */
+static int api_commit(void)
+{
+    if (!save_database()) { db = api_before; return api_fail("保存或备份失败，本次变更已撤销。请检查磁盘空间与目录权限。"); }
+    api_error[0] = '\0'; return 1;
+}
+
+int AT_SaveStudent(int index, const Student *s)
+{
+    int i, conflict;
+    if (!s || index < -1 || index >= db.student_count) return api_fail("学生索引无效。");
+    if (index == -1 && db.student_count == MAX_STUDENTS) return api_fail("学生容量已满。");
+    if ((index == -1 || strcmp(s->id, db.students[index].id)) && !valid_configured_id(s->id)) return api_fail("学号不符合 rules.ini 中的长度或字符规则。");
+    if ((index == -1 || strcmp(s->name, db.students[index].name)) && !valid_name(s->name)) return api_fail("姓名不符合字符数或格式规则。");
+    if (!valid_text(s->class_name, TEXT_SIZE)) return api_fail("班级不能为空、过长或含非法字符。");
+    conflict = find_student(&db, s->id);
+    if (conflict >= 0 && conflict != index) return api_fail("学号已存在。");
+    api_before = db;
+    if (index == -1) db.students[db.student_count++] = *s;
+    else {
+        for (i = 0; i < db.record_count; ++i) if (!strcmp(db.records[i].student_id, db.students[index].id)) strcpy(db.records[i].student_id, s->id);
+        db.students[index] = *s;
+    }
+    return api_commit();
+}
+
+int AT_DeleteStudent(int index)
+{
+    int i, n = 0;
+    char id[ID_SIZE];
+    if (index < 0 || index >= db.student_count) return api_fail("请先选择学生。");
+    api_before = db; strcpy(id, db.students[index].id);
+    memmove(&db.students[index], &db.students[index + 1], (size_t)(db.student_count - index - 1) * sizeof(Student));
+    --db.student_count;
+    for (i = 0; i < db.record_count; ++i) if (strcmp(db.records[i].student_id, id)) db.records[n++] = db.records[i];
+    db.record_count = n; return api_commit();
+}
+
+int AT_SaveRecord(int index, const Attendance *r)
+{
+    int conflict;
+    if (!r || index < -1 || index >= db.record_count) return api_fail("考勤索引无效。");
+    if (index == -1 && db.record_count == MAX_RECORDS) return api_fail("考勤容量已满。");
+    if (!valid_id(r->student_id) || find_student(&db, r->student_id) < 0) return api_fail("学号不存在，请先新增学生。");
+    if (!valid_date(r->month, r->day) || r->period < 1 || r->period > 99 || r->status < 0 || r->status > 5) return api_fail("日期、时间段或状态无效。");
+    conflict = find_record(&db, r->student_id, r->month, r->day, r->period);
+    if (conflict >= 0 && conflict != index) return api_fail("同学号、日期和时间段已有考勤。");
+    api_before = db;
+    if (index == -1) db.records[db.record_count++] = *r;
+    else db.records[index] = *r;
+    return api_commit();
+}
+
+int AT_DeleteRecord(int index)
+{
+    if (index < 0 || index >= db.record_count) return api_fail("请先选择考勤。");
+    api_before = db;
+    memmove(&db.records[index], &db.records[index + 1], (size_t)(db.record_count - index - 1) * sizeof(Attendance));
+    --db.record_count; return api_commit();
+}
+
+int AT_Sort(int key)
+{
+    if (key < 1 || key > 3) return api_fail("排序字段无效。");
+    api_before = db; sort_key = key;
+    qsort(db.records, (size_t)db.record_count, sizeof(Attendance), compare_records);
+    return api_commit();
+}
+
+int AT_Restore(void)
+{
+    Database *restored = calloc(1, sizeof(*restored));
+    if (!restored) return api_fail("内存不足。");
+    if (!load_database_from(DB_FILE ".bak", restored, 0)) { free(restored); return api_fail("备份不存在或已损坏，当前数据保留。"); }
+    api_before = db; db = *restored; free(restored); return api_commit();
+}
+
+int AT_Demo(void)
+{
+    const char *names[] = {"张三", "李四", "王五"};
+    int i, day, length = 7;
+    if (db.student_count || db.record_count) return api_fail("演示数据只能导入空库。");
+    for (i = 0; i < 3; ++i) if (!valid_name(names[i])) return api_fail("当前姓名规则不适用于演示数据。");
+    if (length < rules.id_min) length = rules.id_min;
+    if (length > rules.id_max) length = rules.id_max;
+    api_before = db;
+    for (i = 0; i < 3; ++i) {
+        Student *s = &db.students[db.student_count++];
+        if (length == 7) snprintf(s->id, ID_SIZE, "202600%d", i + 1);
+        else snprintf(s->id, ID_SIZE, "%0*d", length, i + 1);
+        strcpy(s->name, names[i]); strcpy(s->class_name, "人文1班");
+        for (day = 1; day <= 10; ++day) {
+            Attendance *r = &db.records[db.record_count++]; strcpy(r->student_id, s->id);
+            r->month = 10; r->day = day; r->period = day; r->status = (day + i) % 6;
+        }
+    }
+    return api_commit();
+}
+
+int AT_Matches(const Attendance *r, int type, const ReportFilter *filter) { return report_matches(r, type, filter); }
+
+void AT_Count(const ReportFilter *filter, int *people, int *present_people, int *records)
+{
+    int seen[MAX_STUDENTS] = {0}, present[MAX_STUDENTS] = {0}, i;
+    *people = *present_people = *records = 0;
+    for (i = 0; i < db.record_count; ++i) if (report_matches(&db.records[i], 1, filter)) {
+        int student = find_student(&db, db.records[i].student_id);
+        ++*records;
+        if (!seen[student]) { seen[student] = 1; ++*people; }
+        if (db.records[i].status == 0 && !present[student]) { present[student] = 1; ++*present_people; }
+    }
+}
+
+int AT_Export(const char *path, int type, const ReportFilter *filter, int csv)
+{
+    if (!path || !path[0] || !filter || type < 1 || type > 5) return api_fail("导出参数无效。");
+    if (!export_report(path, type, filter, csv)) return api_fail("报表导出失败，原报表保留。");
+    return 1;
+}
+#endif

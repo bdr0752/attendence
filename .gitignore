@@ -12,3 +12,16 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+.vs/
+main.exe
+
+# MFC build output and local core test library
+mfc/obj/
+mfc/.vs/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.tlog
+attendance_core_test.dll
+attendance_mfc.exe
