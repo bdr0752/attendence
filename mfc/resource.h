@@ -4,18 +4,12 @@
 #define IDC_VIEW 1000
 #define IDC_QUERYTYPE 1001
 #define IDC_QUERY 1002
-#define IDC_CLASS 1003
-#define IDC_FIRST 1004
-#define IDC_LAST 1005
 #define IDC_REFRESH 1006
 #define IDC_TABLE 1007
 #define IDC_COUNTS 1008
 #define IDC_ADD 1009
 #define IDC_EDIT 1010
 #define IDC_DELETE 1011
-#define IDC_EXPORT 1012
-#define IDC_DEMO 1013
-#define IDC_RESTORE 1014
 #define IDC_SORTKEY 1015
 #define IDC_SORT 1016
 #define IDC_ID 1020
@@ -25,5 +19,3 @@
 #define IDC_DAY 1024
 #define IDC_PERIOD 1025
 #define IDC_STATUS 1026
-#define IDC_FORMAT 1027
-#define IDC_APPHELP 1028

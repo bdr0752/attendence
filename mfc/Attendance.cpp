@@ -2,7 +2,6 @@
 #include <afxwin.h>
 #include <afxcmn.h>
 #include <afxdialogex.h>
-#include <afxdlgs.h>
 #include <vector>
 #include <cstring>
 #include <cwchar>
@@ -99,14 +98,13 @@ private:
     int index_;
 };
 
-// 主窗口：学生/考勤可编辑，五种报表只读，筛选与导出使用同一快照口径。
+// 主窗口：学生/考勤可编辑，五种报表只读，并按题目要求保存文本。
 class MainDialog : public CDialogEx {
 public:
     MainDialog() : CDialogEx(IDD_MAIN) {}
 protected:
     CListCtrl table_;
     ReportFilter filter_{};
-    bool filterValid_ = false;
     int mode_ = 0;
 
     BOOL OnInitDialog() override {
@@ -117,11 +115,9 @@ protected:
         for (const auto* title : views) view->AddString(title);
         view->SetCurSel(0);
         CComboBox* query = static_cast<CComboBox*>(GetDlgItem(IDC_QUERYTYPE));
-        query->AddString(L"学号"); query->AddString(L"姓名"); query->SetCurSel(0);
+        query->AddString(L"学号"); query->AddString(L"姓名"); query->AddString(L"日期"); query->SetCurSel(0);
         CComboBox* sort = static_cast<CComboBox*>(GetDlgItem(IDC_SORTKEY));
         sort->AddString(L"学号"); sort->AddString(L"姓名"); sort->AddString(L"日期"); sort->SetCurSel(0);
-        CComboBox* format = static_cast<CComboBox*>(GetDlgItem(IDC_FORMAT));
-        format->AddString(L"文本"); format->AddString(L"CSV"); format->SetCurSel(0);
         OnView(); return TRUE;
     }
 
@@ -138,31 +134,25 @@ protected:
         value = month * 100 + day; return true;
     }
 
+    // 查询日期只支持一个月日；日报必须指定日期，其他报表显示全部。
     bool ReadFilter() {
-        filterValid_ = false; ReportFilter next{}; CString className;
-        GetDlgItemText(IDC_CLASS, className);
-        if (!ToUtf8(className, next.class_name, TEXT_SIZE)) { AfxMessageBox(L"班级名称过长或编码无效。"); return false; }
-        if (mode_ != 0) {
-            if (!ParseDate(IDC_FIRST, next.first_date) || (mode_ != 3 && !ParseDate(IDC_LAST, next.last_date))) {
-                AfxMessageBox(L"日期格式必须为MM-DD，且月日合法。"); return false;
-            }
-            if (mode_ == 3) {
-                if (!next.first_date) { AfxMessageBox(L"日报必须填写起始月日。"); return false; }
-                next.last_date = next.first_date;
-            } else if ((next.first_date == 0) != (next.last_date == 0) || next.first_date > next.last_date) {
-                AfxMessageBox(L"日期范围需同时填写起止日期，且起始日期不能晚于结束日期。"); return false;
+        filter_.date = 0;
+        int field = static_cast<CComboBox*>(GetDlgItem(IDC_QUERYTYPE))->GetCurSel();
+        if (mode_ == 3 || (mode_ == 1 && field == 2)) {
+            if (!ParseDate(IDC_QUERY, filter_.date) || (mode_ == 3 && !filter_.date)) {
+                AfxMessageBox(L"请输入合法月日，格式为MM-DD。"); return false;
             }
         }
-        filter_ = next; filterValid_ = true; return true;
+        return true;
     }
 
-    bool QueryMatches(const Student& s) {
-        if (filter_.class_name[0] && strcmp(filter_.class_name, s.class_name)) return false;
-        if (mode_ >= 2) return true; // 报表采用班级和月日筛选，不使用学号/姓名输入。
+    // 学生/考勤可按学号或姓名精确查找，日期通过共用记录匹配接口处理。
+    bool QueryMatches(const Student& student) {
+        if (mode_ >= 2) return true;
         CString query; GetDlgItemText(IDC_QUERY, query);
-        if (query.IsEmpty()) return true;
         int field = static_cast<CComboBox*>(GetDlgItem(IDC_QUERYTYPE))->GetCurSel();
-        return query == FromUtf8(field == 0 ? s.id : s.name);
+        if (query.IsEmpty() || field == 2) return true;
+        return query == FromUtf8(field == 0 ? student.id : student.name);
     }
 
     const Student* RecordStudent(const Attendance& r) {
@@ -234,18 +224,29 @@ protected:
         CString summary;
         summary.Format(L"学生总人数：%d 人    当前结果涉及：%d 人    出勤人数：%d 人    记录数：%d 条", data->student_count, registered, present, records);
         SetDlgItemText(IDC_COUNTS, summary);
+        if (mode_ >= 2 && !AT_SaveReport(reportType, filter_.date)) CoreError();
     }
 
     afx_msg void OnView() {
         mode_ = static_cast<CComboBox*>(GetDlgItem(IDC_VIEW))->GetCurSel();
         bool editable = mode_ <= 1;
-        for (int id : {IDC_ADD, IDC_EDIT, IDC_DELETE, IDC_QUERY, IDC_QUERYTYPE}) GetDlgItem(id)->EnableWindow(editable);
+        for (int id : {IDC_ADD, IDC_EDIT, IDC_DELETE}) GetDlgItem(id)->EnableWindow(editable);
         for (int id : {IDC_SORTKEY, IDC_SORT}) GetDlgItem(id)->EnableWindow(mode_ == 1);
-        GetDlgItem(IDC_EXPORT)->EnableWindow(mode_ >= 2); GetDlgItem(IDC_FORMAT)->EnableWindow(mode_ >= 2);
-        GetDlgItem(IDC_FIRST)->EnableWindow(mode_ != 0); GetDlgItem(IDC_LAST)->EnableWindow(mode_ != 0 && mode_ != 3);
-        if (mode_ == 3) { CString date; GetDlgItemText(IDC_FIRST, date); if (date.IsEmpty()) SetDlgItemText(IDC_FIRST, L"10-01"); }
+        GetDlgItem(IDC_QUERYTYPE)->EnableWindow(editable);
+        GetDlgItem(IDC_QUERY)->EnableWindow(editable || mode_ == 3);
+        CComboBox* queryType = static_cast<CComboBox*>(GetDlgItem(IDC_QUERYTYPE));
+        queryType->ResetContent(); queryType->AddString(L"学号"); queryType->AddString(L"姓名");
+        if (mode_ != 0) queryType->AddString(L"日期");
+        if (mode_ == 3) {
+            queryType->SetCurSel(2); CString date;
+            const Database* data = AT_Data();
+            if (data->record_count) date.Format(L"%02d-%02d", data->records[0].month, data->records[0].day);
+            else { SYSTEMTIME today; GetLocalTime(&today); date.Format(L"%02d-%02d", today.wMonth, today.wDay); }
+            SetDlgItemText(IDC_QUERY, date);
+        } else { queryType->SetCurSel(0); SetDlgItemText(IDC_QUERY, L""); }
         RefreshRows();
     }
+
     afx_msg void OnRefresh() { RefreshRows(); }
     int SelectedIndex() { int row = table_.GetNextItem(-1, LVNI_SELECTED); return row < 0 ? -1 : static_cast<int>(table_.GetItemData(row)); }
     afx_msg void OnAdd() {
@@ -272,27 +273,6 @@ protected:
         RefreshRows();
     }
     afx_msg void OnSort() { if (!AT_Sort(static_cast<CComboBox*>(GetDlgItem(IDC_SORTKEY))->GetCurSel() + 1)) CoreError(); RefreshRows(); }
-    afx_msg void OnExport() {
-        if (mode_ < 2) return;
-        RefreshRows(); if (!filterValid_) return;
-        bool csv = static_cast<CComboBox*>(GetDlgItem(IDC_FORMAT))->GetCurSel() == 1;
-        CFileDialog dialog(FALSE, csv ? L"csv" : L"txt", csv ? L"考勤报表.csv" : L"考勤报表.txt",
-            OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST, csv ? L"CSV文件 (*.csv)|*.csv||" : L"文本文件 (*.txt)|*.txt||", this);
-        if (dialog.DoModal() != IDOK) return;
-        CString path = dialog.GetPathName(); char utf8[32768];
-        if (!ToUtf8(path, utf8, sizeof(utf8))) { AfxMessageBox(L"文件路径过长或编码无效。"); return; }
-        if (!AT_Export(utf8, mode_ - 1, &filter_, csv)) CoreError();
-        else AfxMessageBox(L"报表已导出。", MB_ICONINFORMATION);
-    }
-    afx_msg void OnDemo() {
-        if (AfxMessageBox(L"向空库导入3人、10个日期、10个时段的虚构演示数据？", MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
-        if (!AT_Demo()) CoreError(); RefreshRows();
-    }
-    afx_msg void OnRestore() {
-        if (AfxMessageBox(L"用最近一次变更前的备份替换当前数据？恢复后仍可恢复到当前版本。", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
-        if (!AT_Restore()) CoreError(); RefreshRows();
-    }
-    afx_msg void OnHelp() { AfxMessageBox(L"学生/考勤视图：支持新增、修改、删除和学号/姓名精确查询。\n五种报表：使用班级和月日筛选，可导出文本或CSV。\n学生人数按学号去重；状态次数按记录统计，不自动将未登记算旷课。\n学号、姓名校验规则在程序目录的rules.ini中修改，重启生效。\n数据与控制台版共用，不能同时运行。日期只含月日。", MB_ICONINFORMATION); }
     afx_msg void OnDoubleClick(NMHDR*, LRESULT* result) { *result = 0; OnEdit(); }
     void OnOK() override { OnRefresh(); } // Enter刷新，避免默认关闭主窗口。
     DECLARE_MESSAGE_MAP()
@@ -305,10 +285,6 @@ BEGIN_MESSAGE_MAP(MainDialog, CDialogEx)
     ON_BN_CLICKED(IDC_EDIT, &MainDialog::OnEdit)
     ON_BN_CLICKED(IDC_DELETE, &MainDialog::OnDelete)
     ON_BN_CLICKED(IDC_SORT, &MainDialog::OnSort)
-    ON_BN_CLICKED(IDC_EXPORT, &MainDialog::OnExport)
-    ON_BN_CLICKED(IDC_DEMO, &MainDialog::OnDemo)
-    ON_BN_CLICKED(IDC_RESTORE, &MainDialog::OnRestore)
-    ON_BN_CLICKED(IDC_APPHELP, &MainDialog::OnHelp)
     ON_NOTIFY(NM_DBLCLK, IDC_TABLE, &MainDialog::OnDoubleClick)
 END_MESSAGE_MAP()
 

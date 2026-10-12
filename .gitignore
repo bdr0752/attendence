@@ -15,7 +15,7 @@ __pycache__/
 .vs/
 main.exe
 
-# MFC build output and local core test library
+# MFC build output and per-user settings
 mfc/obj/
 mfc/.vs/
 *.obj
@@ -23,5 +23,6 @@ mfc/.vs/
 *.ilk
 *.idb
 *.tlog
-attendance_core_test.dll
 attendance_mfc.exe
+*.vcxproj.user
+CppProperties.json
