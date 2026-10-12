@@ -1,0 +1,3 @@
+# Preserve Windows launcher line endings in clones and downloadable archives.
+*.bat -text
+*.exe binary

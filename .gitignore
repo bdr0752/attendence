@@ -1,0 +1,14 @@
+# Local attendance data and backups
+attendance.db
+attendance.db.*
+
+# Generated reports and temporary files
+report_*.txt
+report_*.csv
+*.tmp
+
+# Python caches and editor files
+__pycache__/
+*.pyc
+.vscode/
+.idea/
