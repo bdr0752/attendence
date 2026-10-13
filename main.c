@@ -15,6 +15,7 @@
 static Database db;
 static const char *status_names[] = {"出勤", "旷课", "事假", "病假", "迟到", "早退"};
 static const char *status_symbols[] = {"√", "X", "△", "○", "+", "–"};
+static const char *report_paths[] = {"", "report_detail.txt", "report_daily.txt", "report_summary.txt", "report_abnormal.txt", "report_leave.txt"};
 static int input_ended;
 static int sort_key;
 #ifdef _WIN32
@@ -163,8 +164,8 @@ static int valid_text(const char *text, size_t capacity)
 /* 学号允许 ASCII 字母、数字、下划线和连字符；保留前导零。 */
 static int valid_id(const char *id)
 {
-    size_t i;
-    if (!valid_text(id, ID_SIZE)) return 0;
+    size_t i, length = strlen(id);
+    if (!length || length >= ID_SIZE) return 0;
     for (i = 0; id[i]; ++i) {
         unsigned char c = (unsigned char)id[i];
         if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
@@ -173,56 +174,19 @@ static int valid_id(const char *id)
     return 1;
 }
 
-/* 校验姓名格式与字符数；支持汉字、ASCII字母及内部连接符，合法返回1。 */
-static int valid_name(const char *name)
-{
-    size_t i = 0, length = strlen(name);
-    unsigned long c;
-    int count = 0, previous_separator = 1;
-    if (!valid_text(name, TEXT_SIZE)) return 0;
-    while (i < length) {
-        int letter, separator;
-        if (!next_codepoint(name, length, &i, &c)) return 0;
-        ++count;
-        letter = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                 (c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff) ||
-                 (c >= 0xf900 && c <= 0xfaff) || (c >= 0x20000 && c <= 0x2fa1f);
-        separator = c == ' ' || c == '-' || c == 0xb7;
-        if (!letter && (!separator || previous_separator || i == length)) return 0;
-        previous_separator = separator;
-    }
-    return count >= 1 && count <= 31;
-}
-
-/* 读取学生字段：type为0学号、1姓名、2班级；编辑回车保留原值，成功返回1。 */
-static int ask_student_field(const char *prompt, char *output, size_t capacity, int type, const char *current)
+/* 读取文本；is_id指定学号校验，编辑回车保留原值。 */
+static int ask_text(const char *prompt, char *output, size_t capacity, int is_id, const char *current)
 {
     char line[256];
     while (!input_ended) {
         printf("%s", prompt);
         if (!read_line(line, sizeof(line))) continue;
         if (!line[0] && current) { strcpy(output, current); return 1; }
-        if (valid_text(line, capacity) && (type != 0 || valid_id(line)) &&
-            (type != 1 || valid_name(line))) { strcpy(output, line); return 1; }
-        if (type == 0) puts("学号应为1～31个字母、数字、下划线或连字符。");
-        else if (type == 1) puts("姓名应为1～31个汉字或英文字母，可用内部空格、连字符、间隔号连接。");
-        else puts("班级不能为空、过长、含非法字符或首尾空白。");
-    }
-    return 0;
-}
-
-/* 提示并读取字段；is_id 指定是否按学号规则校验，成功返回 1。 */
-static int ask_text(const char *prompt, char *output, size_t capacity, int is_id)
-{
-    char line[256];
-    while (!input_ended) {
-        printf("%s", prompt);
-        if (read_line(line, sizeof(line)) && valid_text(line, capacity) && (!is_id || valid_id(line))) {
-            strcpy(output, line);
-            return 1;
+        if (is_id ? valid_id(line) : valid_text(line, capacity)) {
+            strcpy(output, line); return 1;
         }
-        if (!input_ended) printf("输入无效：不能为空、过长、含 | 或首尾空白。%s\n",
-                                is_id ? "学号只能包含字母、数字、_、-。" : "");
+        if (is_id) puts("学号应为1～31个字母、数字、下划线或连字符。");
+        else puts("文本不能为空、过长、含非法字符或首尾空白。");
     }
     return 0;
 }
@@ -265,6 +229,34 @@ static int find_record(const Database *data, const char *id, int month, int day,
     return -1;
 }
 
+/* 调用前已确认索引有效；控制台与MFC共用学生更新及删除逻辑。 */
+static void update_student(int index, const Student *student)
+{
+    int i;
+    for (i = 0; i < db.record_count; ++i)
+        if (!strcmp(db.records[i].student_id, db.students[index].id))
+            strcpy(db.records[i].student_id, student->id);
+    db.students[index] = *student;
+}
+
+static void remove_student(int index)
+{
+    int i, n = 0;
+    for (i = 0; i < db.record_count; ++i)
+        if (strcmp(db.records[i].student_id, db.students[index].id)) db.records[n++] = db.records[i];
+    db.record_count = n;
+    memmove(&db.students[index], &db.students[index + 1],
+            (size_t)(db.student_count - index - 1) * sizeof(Student));
+    --db.student_count;
+}
+
+static void remove_record(int index)
+{
+    memmove(&db.records[index], &db.records[index + 1],
+            (size_t)(db.record_count - index - 1) * sizeof(Attendance));
+    --db.record_count;
+}
+
 /* 将一行按 | 拆分，保留空字段；参数包括字段数组容量，返回字段数。 */
 static int split_fields(char *line, char **fields, int capacity)
 {
@@ -280,14 +272,14 @@ static int split_fields(char *line, char **fields, int capacity)
 }
 
 /* 严格加载数据库，先完整校验再替换内存；缺失文件视为空库，损坏返回 0。 */
-static int load_database_from(const char *path, Database *target, int allow_missing)
+static int load_database(void)
 {
-    FILE *file = open_file(path, "rb");
+    FILE *file = open_file(DB_FILE, "rb");
     Database *loaded;
     char line[512], *fields[8];
     int ok = 1, line_number = 1, count;
     if (!file) {
-        if (errno == ENOENT && allow_missing) return 1;
+        if (errno == ENOENT) return 1;
         perror("无法打开数据文件");
         return 0;
     }
@@ -311,7 +303,7 @@ static int load_database_from(const char *path, Database *target, int allow_miss
             strcpy(s->id, fields[1]); strcpy(s->name, fields[2]); strcpy(s->class_name, fields[3]);
         } else if (count == 6 && !strcmp(fields[0], "A")) {
             Attendance r;
-            if (loaded->record_count == MAX_RECORDS || !valid_id(fields[1]) ||
+            if (loaded->record_count == MAX_RECORDS ||
                 find_student(loaded, fields[1]) < 0 ||
                 !parse_number(fields[2], 1, 12, &r.month) || !parse_number(fields[3], 1, 31, &r.day) ||
                 !parse_number(fields[4], 1, 99, &r.period) || !parse_number(fields[5], 0, 5, &r.status) ||
@@ -324,7 +316,7 @@ static int load_database_from(const char *path, Database *target, int allow_miss
     }
     if (ferror(file)) ok = 0;
     if (fclose(file)) ok = 0;
-    if (ok) *target = *loaded;
+    if (ok) db = *loaded;
     else printf("数据文件第 %d 行附近无效。程序停止，原文件保留，请检查数据文件。\n", line_number);
     free(loaded);
     return ok;
@@ -359,18 +351,18 @@ static int save_database(void)
 {
     const char *temporary = DB_FILE ".tmp";
     FILE *file = open_file(temporary, "wb");
-    int i, ok = 1;
+    int i, ok;
     if (!file) { perror("无法创建临时数据文件"); return 0; }
-    if (fprintf(file, "ATTENDANCE_V1\n") < 0) ok = 0;
-    for (i = 0; ok && i < db.student_count; ++i) {
+    fprintf(file, "ATTENDANCE_V1\n");
+    for (i = 0; i < db.student_count; ++i) {
         Student *s = &db.students[i];
-        if (fprintf(file, "S|%s|%s|%s\n", s->id, s->name, s->class_name) < 0) ok = 0;
+        fprintf(file, "S|%s|%s|%s\n", s->id, s->name, s->class_name);
     }
-    for (i = 0; ok && i < db.record_count; ++i) {
+    for (i = 0; i < db.record_count; ++i) {
         Attendance *r = &db.records[i];
-        if (fprintf(file, "A|%s|%d|%d|%d|%d\n", r->student_id, r->month, r->day, r->period, r->status) < 0) ok = 0;
+        fprintf(file, "A|%s|%d|%d|%d|%d\n", r->student_id, r->month, r->day, r->period, r->status);
     }
-    if (!finish_file(file)) ok = 0;
+    ok = finish_file(file);
     if (ok) ok = replace_file(temporary, DB_FILE);
     if (!ok) { remove_file(temporary); puts("保存失败，原数据文件保留。"); }
     return ok;
@@ -393,10 +385,10 @@ static int add_student(void)
 {
     Student s;
     if (db.student_count == MAX_STUDENTS) { puts("学生容量已满。"); return 0; }
-    if (!ask_student_field("学号：", s.id, sizeof(s.id), 0, NULL)) return 0;
+    if (!ask_text("学号：", s.id, sizeof(s.id), 1, NULL)) return 0;
     if (find_student(&db, s.id) >= 0) { puts("学号已存在，不可重复增加。"); return 0; }
-    if (!ask_student_field("姓名：", s.name, sizeof(s.name), 1, NULL) ||
-        !ask_student_field("班级：", s.class_name, sizeof(s.class_name), 2, NULL)) return 0;
+    if (!ask_text("姓名：", s.name, sizeof(s.name), 0, NULL) ||
+        !ask_text("班级：", s.class_name, sizeof(s.class_name), 0, NULL)) return 0;
     db.students[db.student_count++] = s;
     return 1;
 }
@@ -405,23 +397,21 @@ static int add_student(void)
 static int edit_student(void)
 {
     char id[ID_SIZE];
-    int index, conflict, i;
+    int index, conflict;
     Student s;
-    if (!ask_text("待修改学号：", id, sizeof(id), 1)) return 0;
+    if (!ask_text("待修改学号：", id, sizeof(id), 1, NULL)) return 0;
     index = find_student(&db, id);
     if (index < 0) { puts("学生不存在。"); return 0; }
     s = db.students[index];
     printf("当前：%s | %s | %s\n", s.id, s.name, s.class_name);
-    if (!ask_student_field("新学号（回车保留）：", s.id, sizeof(s.id), 0, db.students[index].id)) return 0;
+    if (!ask_text("新学号（回车保留）：", s.id, sizeof(s.id), 1, db.students[index].id)) return 0;
     conflict = find_student(&db, s.id);
     if (conflict >= 0 && conflict != index) { puts("新学号已存在，修改取消。"); return 0; }
-    if (!ask_student_field("新姓名（回车保留）：", s.name, sizeof(s.name), 1, db.students[index].name) ||
-        !ask_student_field("新班级（回车保留）：", s.class_name, sizeof(s.class_name), 2, db.students[index].class_name)) return 0;
+    if (!ask_text("新姓名（回车保留）：", s.name, sizeof(s.name), 0, db.students[index].name) ||
+        !ask_text("新班级（回车保留）：", s.class_name, sizeof(s.class_name), 0, db.students[index].class_name)) return 0;
     if (!strcmp(s.id, db.students[index].id) && !strcmp(s.name, db.students[index].name) &&
         !strcmp(s.class_name, db.students[index].class_name)) { puts("内容未变更。"); return 0; }
-    for (i = 0; i < db.record_count; ++i)
-        if (!strcmp(db.records[i].student_id, id)) strcpy(db.records[i].student_id, s.id);
-    db.students[index] = s;
+    update_student(index, &s);
     return 1;
 }
 
@@ -429,26 +419,21 @@ static int edit_student(void)
 static int delete_student(void)
 {
     char id[ID_SIZE];
-    int index, i, count = 0, answer, write_index = 0;
-    if (!ask_text("待删除学号：", id, sizeof(id), 1)) return 0;
+    int index, i, count = 0, answer;
+    if (!ask_text("待删除学号：", id, sizeof(id), 1, NULL)) return 0;
     index = find_student(&db, id);
     if (index < 0) { puts("学生不存在。"); return 0; }
     for (i = 0; i < db.record_count; ++i) if (!strcmp(db.records[i].student_id, id)) ++count;
     printf("将删除 %s（%s）和 %d 条关联考勤。\n", db.students[index].name, id, count);
     if (!ask_number("确认删除？1 是，0 取消：", 0, 1, &answer) || !answer) return 0;
-    memmove(&db.students[index], &db.students[index + 1],
-            (size_t)(db.student_count - index - 1) * sizeof(Student));
-    --db.student_count;
-    for (i = 0; i < db.record_count; ++i)
-        if (strcmp(db.records[i].student_id, id)) db.records[write_index++] = db.records[i];
-    db.record_count = write_index;
+    remove_student(index);
     return 1;
 }
 
 /* 读取考勤唯一键并验证学生存在；写入记录参数，成功返回 1。 */
 static int ask_record_key(Attendance *r)
 {
-    if (!ask_text("学号：", r->student_id, sizeof(r->student_id), 1)) return 0;
+    if (!ask_text("学号：", r->student_id, sizeof(r->student_id), 1, NULL)) return 0;
     if (find_student(&db, r->student_id) < 0) { puts("学生不存在，请先新增学生。"); return 0; }
     return ask_date(&r->month, &r->day) && ask_number("时间段编号（1～99）：", 1, 99, &r->period);
 }
@@ -502,9 +487,7 @@ static int delete_attendance(void)
     index = find_record(&db, r.student_id, r.month, r.day, r.period);
     if (index < 0) { puts("考勤记录不存在。"); return 0; }
     if (!ask_number("确认删除这条考勤？1 是，0 取消：", 0, 1, &answer) || !answer) return 0;
-    memmove(&db.records[index], &db.records[index + 1],
-            (size_t)(db.record_count - index - 1) * sizeof(Attendance));
-    --db.record_count;
+    remove_record(index);
     return 1;
 }
 
@@ -519,14 +502,14 @@ static void print_record(FILE *output, const Attendance *r)
     if (output == stdout) set_color(-1);
 }
 
-/* 显示全部或按学号、姓名、月日、班级查询的考勤，无返回值。 */
+/* 显示全部或按学号、姓名、月日查询的考勤。 */
 static void query_attendance(void)
 {
     int mode, month = 0, day = 0, i, count = 0;
     char query[TEXT_SIZE] = "";
     if (!ask_number("查询：0 全部，1 学号，2 姓名，3 日期：", 0, 3, &mode)) return;
     if (mode == 3) { if (!ask_date(&month, &day)) return; }
-    else if (mode && !ask_text("查询值（精确匹配）：", query, mode == 1 ? ID_SIZE : sizeof(query), mode == 1)) return;
+    else if (mode && !ask_text("查询值（精确匹配）：", query, mode == 1 ? ID_SIZE : sizeof(query), mode == 1, NULL)) return;
     puts("\n学号 | 姓名 | 班级 | 日期 | 时间段 | 状态");
     for (i = 0; i < db.record_count; ++i) {
         Attendance *r = &db.records[i];
@@ -615,28 +598,26 @@ static void write_report(FILE *output, int type, const ReportFilter *filter)
 }
 
 /* 通过临时文件导出一种报表；失败保留原报表，成功返回 1。 */
-static int export_report(const char *path, int type, const ReportFilter *filter)
+static int export_report(int type, const ReportFilter *filter)
 {
-    char *temporary;
+    const char *path = report_paths[type];
+    char temporary[64];
     FILE *file;
     int ok;
-    temporary = malloc(strlen(path) + 5);
-    if (!temporary) { puts("内存不足。"); return 0; }
     sprintf(temporary, "%s.tmp", path);
     file = open_file(temporary, "wb");
-    if (!file) { printf("无法创建报表临时文件：%s。\n", strerror(errno)); free(temporary); return 0; }
+    if (!file) { printf("无法创建报表临时文件：%s。\n", strerror(errno)); return 0; }
     write_report(file, type, filter);
     ok = finish_file(file);
     if (ok) ok = replace_file(temporary, path);
     if (!ok) { remove_file(temporary); puts("报表导出失败，原报表保留。"); }
     else printf("已导出到 %s。\n", path);
-    free(temporary); return ok;
+    return ok;
 }
 
 /* 显示并自动保存五类文本报表；日报需输入月日，无参数、无返回值。 */
 static void reports(void)
 {
-    static const char *paths[] = {"", "report_detail.txt", "report_daily.txt", "report_summary.txt", "report_abnormal.txt", "report_leave.txt"};
     ReportFilter filter = {0};
     int type, month, day;
     if (!ask_number("报表：1 明细，2 日报，3 汇总，4 异常，5 请假：", 1, 5, &type)) return;
@@ -645,7 +626,7 @@ static void reports(void)
         filter.date = month * 100 + day;
     }
     write_report(stdout, type, &filter);
-    export_report(paths[type], type, &filter);
+    export_report(type, &filter);
 }
 
 /* 显示题目要求的功能菜单，无参数、无返回值。 */
@@ -681,7 +662,7 @@ int main(void)
 #endif
     setvbuf(stdout, NULL, _IONBF, 0);
     puts("数据文件：当前工作目录下的 " DB_FILE "（UTF-8文本）。");
-    if (!load_database_from(DB_FILE, &db, 1)) {
+    if (!load_database()) {
 #ifdef _WIN32
         CloseHandle(database_lock);
 #endif
@@ -748,7 +729,7 @@ int AT_Open(void)
     if (api_lock == INVALID_HANDLE_VALUE) return api_fail("无法取得文件锁，请关闭其他考勤程序并检查目录写入权限。");
 #endif
     memset(&db, 0, sizeof(db));
-    if (!load_database_from(DB_FILE, &db, 1)) {
+    if (!load_database()) {
         AT_Close(); return api_fail("数据文件无效，原文件已保留。请检查 attendance.db。");
     }
     return 1;
@@ -771,33 +752,25 @@ static int api_commit(void)
 
 int AT_SaveStudent(int index, const Student *s)
 {
-    int i, conflict;
+    int conflict;
     if (!s || index < -1 || index >= db.student_count) return api_fail("学生索引无效。");
     if (index == -1 && db.student_count == MAX_STUDENTS) return api_fail("学生容量已满。");
-    if ((index == -1 || strcmp(s->id, db.students[index].id)) && !valid_id(s->id)) return api_fail("学号应为1～31个字母、数字、下划线或连字符。");
-    if ((index == -1 || strcmp(s->name, db.students[index].name)) && !valid_name(s->name)) return api_fail("姓名不符合字符数或格式规则。");
+    if (!valid_id(s->id)) return api_fail("学号应为1～31个字母、数字、下划线或连字符。");
+    if (!valid_text(s->name, TEXT_SIZE)) return api_fail("姓名不能为空、过长或含非法字符。");
     if (!valid_text(s->class_name, TEXT_SIZE)) return api_fail("班级不能为空、过长或含非法字符。");
     conflict = find_student(&db, s->id);
     if (conflict >= 0 && conflict != index) return api_fail("学号已存在。");
     api_before = db;
     if (index == -1) db.students[db.student_count++] = *s;
-    else {
-        for (i = 0; i < db.record_count; ++i) if (!strcmp(db.records[i].student_id, db.students[index].id)) strcpy(db.records[i].student_id, s->id);
-        db.students[index] = *s;
-    }
+    else update_student(index, s);
     return api_commit();
 }
 
 int AT_DeleteStudent(int index)
 {
-    int i, n = 0;
-    char id[ID_SIZE];
     if (index < 0 || index >= db.student_count) return api_fail("请先选择学生。");
-    api_before = db; strcpy(id, db.students[index].id);
-    memmove(&db.students[index], &db.students[index + 1], (size_t)(db.student_count - index - 1) * sizeof(Student));
-    --db.student_count;
-    for (i = 0; i < db.record_count; ++i) if (strcmp(db.records[i].student_id, id)) db.records[n++] = db.records[i];
-    db.record_count = n; return api_commit();
+    api_before = db; remove_student(index);
+    return api_commit();
 }
 
 int AT_SaveRecord(int index, const Attendance *r)
@@ -805,7 +778,7 @@ int AT_SaveRecord(int index, const Attendance *r)
     int conflict;
     if (!r || index < -1 || index >= db.record_count) return api_fail("考勤索引无效。");
     if (index == -1 && db.record_count == MAX_RECORDS) return api_fail("考勤容量已满。");
-    if (!valid_id(r->student_id) || find_student(&db, r->student_id) < 0) return api_fail("学号不存在，请先新增学生。");
+    if (find_student(&db, r->student_id) < 0) return api_fail("学号不存在，请先新增学生。");
     if (!valid_date(r->month, r->day) || r->period < 1 || r->period > 99 || r->status < 0 || r->status > 5) return api_fail("日期、时间段或状态无效。");
     conflict = find_record(&db, r->student_id, r->month, r->day, r->period);
     if (conflict >= 0 && conflict != index) return api_fail("同学号、日期和时间段已有考勤。");
@@ -819,8 +792,7 @@ int AT_DeleteRecord(int index)
 {
     if (index < 0 || index >= db.record_count) return api_fail("请先选择考勤。");
     api_before = db;
-    memmove(&db.records[index], &db.records[index + 1], (size_t)(db.record_count - index - 1) * sizeof(Attendance));
-    --db.record_count; return api_commit();
+    remove_record(index); return api_commit();
 }
 
 int AT_Sort(int key)
@@ -836,11 +808,10 @@ int AT_Matches(const Attendance *r, int type, const ReportFilter *filter) { retu
 /* 查看报表后保存文本；type为1～5，日报date为MMDD，其他报表date=0。 */
 int AT_SaveReport(int type, int date)
 {
-    static const char *paths[] = {"", "report_detail.txt", "report_daily.txt", "report_summary.txt", "report_abnormal.txt", "report_leave.txt"};
     ReportFilter filter = {date};
     if (type < 1 || type > 5 || (type == 2 && !valid_date(date / 100, date % 100)) ||
         (type != 2 && date != 0)) return api_fail("报表类型或日期无效。");
-    if (!export_report(paths[type], type, &filter)) return api_fail("报表保存失败，原报表保留。");
+    if (!export_report(type, &filter)) return api_fail("报表保存失败，原报表保留。");
     return 1;
 }
 

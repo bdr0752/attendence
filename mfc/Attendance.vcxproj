@@ -37,11 +37,13 @@
       <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
       <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
     </ClCompile>
-    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>comctl32.lib;uxtheme.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <Manifest><AdditionalManifestFiles>app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Attendance.cpp" />
+    <ClCompile Include="Theme.cpp" />
+    <ClInclude Include="Theme.h" />
     <ClCompile Include="..\main.c"><CompileAs>CompileAsC</CompileAs><PreprocessorDefinitions>ATTENDANCE_CORE_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
     <ClInclude Include="resource.h" /><ClInclude Include="..\attendance_core.h" />
     <ResourceCompile Include="Attendance.rc" />

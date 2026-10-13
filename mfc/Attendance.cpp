@@ -5,10 +5,10 @@
 #include <vector>
 #include <cstring>
 #include <cwchar>
-#include <cstdlib>
-#include <io.h>
 #include <direct.h>
 #include "resource.h"
+#include "Theme.h"
+#include <uxtheme.h>
 #include "../attendance_core.h"
 
 // UTF-8与Unicode窗口字符串转换，非法输入返回空字符串。
@@ -42,12 +42,13 @@ static CString StatusText(int status) {
 }
 
 // 编辑对话框在保存失败时保持打开，用户输入不会丢失。
-class StudentDialog : public CDialogEx {
+class StudentDialog : public StyledDialog {
 public:
-    explicit StudentDialog(int index) : CDialogEx(IDD_STUDENT), index_(index) {}
+    explicit StudentDialog(int index) : StyledDialog(IDD_STUDENT), index_(index) {}
 protected:
     BOOL OnInitDialog() override {
-        CDialogEx::OnInitDialog();
+        StyledDialog::OnInitDialog();
+        SetWindowText(index_ < 0 ? L"新增学生" : L"修改学生");
         if (index_ >= 0) {
             const Student& s = AT_Data()->students[index_];
             SetDlgItemText(IDC_ID, FromUtf8(s.id)); SetDlgItemText(IDC_NAME, FromUtf8(s.name));
@@ -69,12 +70,13 @@ private:
     int index_;
 };
 
-class RecordDialog : public CDialogEx {
+class RecordDialog : public StyledDialog {
 public:
-    explicit RecordDialog(int index) : CDialogEx(IDD_RECORD), index_(index) {}
+    explicit RecordDialog(int index) : StyledDialog(IDD_RECORD), index_(index) {}
 protected:
     BOOL OnInitDialog() override {
-        CDialogEx::OnInitDialog();
+        StyledDialog::OnInitDialog();
+        SetWindowText(index_ < 0 ? L"新增考勤" : L"修改考勤");
         CComboBox* status = static_cast<CComboBox*>(GetDlgItem(IDC_STATUS));
         for (int i = 0; i < 6; ++i) status->AddString(StatusText(i));
         Attendance r{}; r.month = 1; r.day = 1; r.period = 1;
@@ -99,26 +101,122 @@ private:
 };
 
 // 主窗口：学生/考勤可编辑，五种报表只读，并按题目要求保存文本。
-class MainDialog : public CDialogEx {
+class MainDialog : public StyledDialog {
 public:
-    MainDialog() : CDialogEx(IDD_MAIN) {}
+    MainDialog() : StyledDialog(IDD_MAIN) {}
 protected:
-    CListCtrl table_;
+    StyledList table_;
+    CImageList rowSpacing_;
+    std::vector<CString> columnTitles_;
+    CRect searchArea_, countsArea_;
+    bool ready_ = false;
     ReportFilter filter_{};
     int mode_ = 0;
 
     BOOL OnInitDialog() override {
-        CDialogEx::OnInitDialog(); table_.SubclassDlgItem(IDC_TABLE, this);
-        table_.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+        StyledDialog::OnInitDialog(); table_.SubclassDlgItem(IDC_TABLE, this);
+        table_.ModifyStyle(WS_BORDER, 0, SWP_FRAMECHANGED);
+        table_.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        table_.SetBkColor(Palette::Surface); table_.SetTextBkColor(Palette::Surface); table_.SetTextColor(Palette::Text);
+        SetWindowTheme(table_.GetSafeHwnd(), L"Explorer", nullptr);
+        rowSpacing_.Create(1, Scale(30), ILC_COLOR32, 1, 1); table_.SetImageList(&rowSpacing_, LVSIL_SMALL);
         const wchar_t* views[] = {L"学生管理", L"考勤记录", L"考勤明细表", L"考勤日报表", L"考勤汇总表", L"考勤异常表", L"请假汇总表"};
         CComboBox* view = static_cast<CComboBox*>(GetDlgItem(IDC_VIEW));
         for (const auto* title : views) view->AddString(title);
         view->SetCurSel(0);
-        CComboBox* query = static_cast<CComboBox*>(GetDlgItem(IDC_QUERYTYPE));
-        query->AddString(L"学号"); query->AddString(L"姓名"); query->AddString(L"日期"); query->SetCurSel(0);
         CComboBox* sort = static_cast<CComboBox*>(GetDlgItem(IDC_SORTKEY));
         sort->AddString(L"学号"); sort->AddString(L"姓名"); sort->AddString(L"日期"); sort->SetCurSel(0);
+        ready_ = true;
+        MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfo(MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST), &monitor);
+        int width = min(Scale(1100), monitor.rcWork.right - monitor.rcWork.left - Scale(40));
+        int height = min(Scale(720), monitor.rcWork.bottom - monitor.rcWork.top - Scale(40));
+        SetWindowPos(nullptr, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        CenterWindow(); CRect area; GetClientRect(&area); Layout(area.Width(), area.Height());
         OnView(); return TRUE;
+    }
+
+    // 按当前客户区尺寸排列控件；使用DPI缩放后的像素，不改变数据或筛选条件。
+    void Layout(int width, int height) {
+        if (!ready_) return;
+        int margin = Scale(24), gap = Scale(12), header = Scale(92), control = Scale(36);
+        auto place = [this](int id, int x, int y, int w, int h) { GetDlgItem(id)->MoveWindow(x,y,max(1,w),max(1,h)); };
+        place(IDC_TITLE, margin + Scale(56), Scale(18), width - 2*margin - Scale(56), Scale(36));
+        place(IDC_SUBTITLE, margin + Scale(56), Scale(58), width - 2*margin - Scale(56), Scale(20));
+        int y = header + Scale(18), x = margin + Scale(18);
+        searchArea_.SetRect(margin, y, width-margin, y+Scale(90));
+        place(IDC_VIEW_LABEL, x, y+Scale(21), Scale(38), Scale(22)); x += Scale(44);
+        place(IDC_VIEW, x, y+Scale(15), Scale(188), Scale(230)); x += Scale(188)+gap;
+        place(IDC_QUERYTYPE, x, y+Scale(15), Scale(90), Scale(130)); x += Scale(90)+gap;
+        int queryWidth = width - margin - Scale(18) - x - gap - Scale(116);
+        place(IDC_QUERY, x, y+Scale(15), queryWidth, control);
+        place(IDC_REFRESH, x+queryWidth+gap, y+Scale(13), Scale(116), Scale(40));
+        place(IDC_HINT, margin+Scale(18), y+Scale(61), width-2*margin-Scale(36), Scale(18));
+        y += Scale(106);
+        countsArea_.SetRect(margin,y,width-margin,y+Scale(52));
+        place(IDC_COUNTS, margin+Scale(18), y+Scale(15), width-2*margin-Scale(36), Scale(24));
+        y += Scale(68);
+        place(IDC_TABLE, margin+1,y,width-2*margin-2,height-y-Scale(102));
+        int actions = height-Scale(83);
+        place(IDC_ADD,margin,actions,Scale(96),Scale(40));
+        place(IDC_EDIT,margin+Scale(108),actions,Scale(82),Scale(40));
+        place(IDC_DELETE,margin+Scale(202),actions,Scale(82),Scale(40));
+        place(IDC_SORT_LABEL,margin+Scale(310),actions+Scale(10),Scale(60),Scale(22));
+        place(IDC_SORTKEY,margin+Scale(375),actions+Scale(2),Scale(100),Scale(130));
+        place(IDC_SORT,margin+Scale(487),actions,Scale(76),Scale(40));
+        place(IDCANCEL,width-margin-Scale(80),actions,Scale(80),Scale(40));
+        place(IDC_FOOTER,margin,height-Scale(29),width-2*margin,Scale(18));
+        ResizeColumns(); Invalidate(FALSE);
+    }
+
+    // 根据列含义分配宽度，汇总中的数字列保持紧凑。
+    void ResizeColumns() {
+        if (columnTitles_.empty()) return;
+        CRect area; table_.GetClientRect(&area); int available = max(1,area.Width()-Scale(20));
+        const int record[] = {18,17,22,14,12,17}, summary[] = {15,13,14,8,8,8,8,8,8,10}, students[] = {25,25,50};
+        for (size_t i=0; i<columnTitles_.size(); ++i) {
+            int weight = columnTitles_.size()==3 ? students[i] : (columnTitles_.size()==10 ? summary[i] : record[i]);
+            table_.SetColumnWidth(static_cast<int>(i),max(Scale(76),available*weight/100));
+        }
+    }
+
+    afx_msg void OnSize(UINT type, int width, int height) { StyledDialog::OnSize(type,width,height); Layout(width,height); }
+    afx_msg void OnGetMinMaxInfo(MINMAXINFO* info) {
+        StyledDialog::OnGetMinMaxInfo(info);
+        MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfo(MonitorFromWindow(m_hWnd, MONITOR_DEFAULTTONEAREST),&monitor);
+        info->ptMinTrackSize.x = min(Scale(900),monitor.rcWork.right-monitor.rcWork.left-Scale(24));
+        info->ptMinTrackSize.y = min(Scale(600),monitor.rcWork.bottom-monitor.rcWork.top-Scale(24));
+    }
+    afx_msg void OnPaint() {
+        CPaintDC dc(this); int saved=dc.SaveDC(); CRect area; GetClientRect(&area); dc.FillSolidRect(area,Palette::Background);
+        dc.FillSolidRect(0,0,area.Width(),Scale(92),Palette::Surface);
+        CPen line(PS_SOLID,1,Palette::Border); CBrush surface(Palette::Surface);
+        dc.SelectObject(&line); dc.SelectObject(&surface);
+        dc.RoundRect(searchArea_,CPoint(Scale(16),Scale(16))); dc.RoundRect(countsArea_,CPoint(Scale(16),Scale(16)));
+        CRect mark(Scale(24),Scale(25),Scale(64),Scale(65)); CBrush blue(Palette::Primary); CPen blueLine(PS_SOLID,1,Palette::Primary);
+        dc.SelectObject(&blue); dc.SelectObject(&blueLine); dc.RoundRect(mark,CPoint(Scale(14),Scale(14)));
+        dc.SetTextColor(Palette::Surface); dc.SetBkMode(TRANSPARENT); dc.SelectObject(&strongFont_);
+        dc.DrawText(L"考",mark,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        dc.RestoreDC(saved);
+    }
+    afx_msg HBRUSH OnCtlColor(CDC* dc, CWnd* control, UINT kind) {
+        HBRUSH brush = StyledDialog::OnCtlColor(dc,control,kind);
+        int id = control->GetDlgCtrlID();
+        if (id==IDC_TITLE || id==IDC_SUBTITLE || id==IDC_COUNTS || id==IDC_VIEW_LABEL || id==IDC_HINT) {
+            dc->SetBkMode(TRANSPARENT); dc->SetTextColor(id==IDC_SUBTITLE || id==IDC_HINT ? Palette::Muted : Palette::Text);
+            return surfaceBrush_;
+        }
+        if (id==IDC_FOOTER || id==IDC_SORT_LABEL) dc->SetTextColor(Palette::Muted);
+        return brush;
+    }
+
+    // 输入提示随查询字段更新，不自动改变已输入内容或触发查询。
+    afx_msg void OnQueryType() {
+        int field=static_cast<CComboBox*>(GetDlgItem(IDC_QUERYTYPE))->GetCurSel();
+        const wchar_t* cue=field==2 ? L"输入月日，如 10-12" : (field==1 ? L"输入姓名" : L"输入学号");
+        GetDlgItem(IDC_QUERY)->SendMessage(EM_SETCUEBANNER,TRUE,reinterpret_cast<LPARAM>(cue));
+        SetDlgItemText(IDC_HINT,field==2 ? L"日期只含月日，格式为 MM-DD；留空显示全部考勤。" : L"按所选字段精确查询，留空显示全部记录。");
+        if (mode_==3) SetDlgItemText(IDC_HINT,L"填写一个月日后查看日报；报表会自动保存为文本。");
+        else if (mode_>=2) SetDlgItemText(IDC_HINT,L"当前报表统计全部记录；查看后自动保存为文本。");
     }
 
     // 解析月日，不采用系统年份；只接受MM-DD或M-D以及合法月日。
@@ -162,10 +260,10 @@ protected:
     }
 
     void Columns(const std::vector<CString>& titles) {
+        columnTitles_ = titles;
         table_.DeleteAllItems(); while (table_.DeleteColumn(0)) {}
-        CRect area; table_.GetClientRect(&area);
-        int width = max(65, (area.Width() - 24) / static_cast<int>(titles.size()));
-        for (size_t i = 0; i < titles.size(); ++i) table_.InsertColumn(static_cast<int>(i), titles[i], LVCFMT_LEFT, width);
+        for (size_t i = 0; i < titles.size(); ++i) table_.InsertColumn(static_cast<int>(i), titles[i], LVCFMT_LEFT, 0);
+        ResizeColumns();
     }
 
     void AddRow(const std::vector<CString>& cells, int originalIndex) {
@@ -194,7 +292,7 @@ protected:
         if (aggregate) {
             Columns(reportType == 3 ? std::vector<CString>{L"学号",L"姓名",L"班级",L"出勤次数",L"旷课次数",L"事假次数",L"病假次数",L"迟到次数",L"早退次数",L"记录数"} :
                 std::vector<CString>{L"学号",L"姓名",L"班级",L"事假次数",L"病假次数",L"请假合计"});
-            for (int i = 0; i < data->student_count; ++i) if (QueryMatches(data->students[i])) {
+            for (int i = 0; i < data->student_count; ++i) {
                 const Student& s = data->students[i]; int counts[6] = {}, total = 0;
                 for (int j = 0; j < data->record_count; ++j) {
                     const Attendance& r = data->records[j];
@@ -229,6 +327,9 @@ protected:
 
     afx_msg void OnView() {
         mode_ = static_cast<CComboBox*>(GetDlgItem(IDC_VIEW))->GetCurSel();
+        const wchar_t* descriptions[]={L"维护学号、姓名与班级信息",L"登记课堂考勤，查看每一次出勤情况",L"查看全部考勤明细",L"按月日查看当日考勤",L"按学生汇总六种考勤状态",L"集中查看旷课、迟到和早退记录",L"汇总事假、病假与请假总次数"};
+        SetDlgItemText(IDC_SUBTITLE,descriptions[mode_]);
+        SetDlgItemText(IDC_REFRESH,mode_==0 ? L"查询学生" : (mode_==1 ? L"查询考勤" : (mode_==3 ? L"查看日报" : L"刷新报表")));
         bool editable = mode_ <= 1;
         for (int id : {IDC_ADD, IDC_EDIT, IDC_DELETE}) GetDlgItem(id)->EnableWindow(editable);
         for (int id : {IDC_SORTKEY, IDC_SORT}) GetDlgItem(id)->EnableWindow(mode_ == 1);
@@ -244,20 +345,20 @@ protected:
             else { SYSTEMTIME today; GetLocalTime(&today); date.Format(L"%02d-%02d", today.wMonth, today.wDay); }
             SetDlgItemText(IDC_QUERY, date);
         } else { queryType->SetCurSel(0); SetDlgItemText(IDC_QUERY, L""); }
-        RefreshRows();
+        OnQueryType(); RefreshRows();
     }
 
     afx_msg void OnRefresh() { RefreshRows(); }
     int SelectedIndex() { int row = table_.GetNextItem(-1, LVNI_SELECTED); return row < 0 ? -1 : static_cast<int>(table_.GetItemData(row)); }
-    afx_msg void OnAdd() {
-        if (mode_ == 0) { StudentDialog dialog(-1); if (dialog.DoModal() == IDOK) RefreshRows(); }
-        else if (mode_ == 1) { RecordDialog dialog(-1); if (dialog.DoModal() == IDOK) RefreshRows(); }
+    void OpenEditor(int index) {
+        if (mode_ == 0) { StudentDialog dialog(index); if (dialog.DoModal() == IDOK) RefreshRows(); }
+        else if (mode_ == 1) { RecordDialog dialog(index); if (dialog.DoModal() == IDOK) RefreshRows(); }
     }
+    afx_msg void OnAdd() { OpenEditor(-1); }
     afx_msg void OnEdit() {
         if (mode_ > 1) return;
         int index = SelectedIndex(); if (index < 0) { AfxMessageBox(L"请先选择一行。"); return; }
-        if (mode_ == 0) { StudentDialog dialog(index); if (dialog.DoModal() == IDOK) RefreshRows(); }
-        else { RecordDialog dialog(index); if (dialog.DoModal() == IDOK) RefreshRows(); }
+        OpenEditor(index);
     }
     afx_msg void OnDelete() {
         if (mode_ > 1) return;
@@ -278,7 +379,12 @@ protected:
     DECLARE_MESSAGE_MAP()
 };
 
-BEGIN_MESSAGE_MAP(MainDialog, CDialogEx)
+BEGIN_MESSAGE_MAP(MainDialog, StyledDialog)
+    ON_WM_SIZE()
+    ON_WM_GETMINMAXINFO()
+    ON_WM_PAINT()
+    ON_WM_CTLCOLOR()
+    ON_CBN_SELCHANGE(IDC_QUERYTYPE, &MainDialog::OnQueryType)
     ON_CBN_SELCHANGE(IDC_VIEW, &MainDialog::OnView)
     ON_BN_CLICKED(IDC_REFRESH, &MainDialog::OnRefresh)
     ON_BN_CLICKED(IDC_ADD, &MainDialog::OnAdd)

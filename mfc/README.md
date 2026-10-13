@@ -24,8 +24,12 @@ powershell -ExecutionPolicy Bypass -File .\build_mfc.ps1
 
 窗口与原有控制台共用C数据实现及同格式文件，只能在同一目录共用同一数据库。此版本仅提供题目功能。
 
+界面使用浅色背景、统一字体和圆角按钮，考勤状态以不同颜色区分。主窗口支持调整大小，表格随窗口伸展，底部操作按钮保持可见。
+
 ## 源文件
 
 `Attendance.cpp`为窗口操作，`Attendance.rc`与`resource.h`为界面资源，`Attendance.vcxproj`与`Attendance.sln`为工程。根目录`attendance_core.h`为接口，`main.c`为数据实现和控制台入口。定义`ATTENDANCE_CORE_ONLY`后，`main.c`提供MFC接口而不生成控制台入口。
+
+`Theme.cpp`与`Theme.h`负责字体、配色、按钮和表格绘制，不处理考勤数据。
 
 本机Release x64编译与窗口流程验证完成；验证范围包括新增、查询、人数显示、五类报表保存和退出，不代表所有显示缩放和部署环境均已测试。
